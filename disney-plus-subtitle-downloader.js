@@ -18,7 +18,7 @@
   // SECTION 1: CONSTANTS & STATE
   // ============================================================
 
-  const VERSION = '3.6.0';
+  const VERSION = '3.7.0';
   const MENU_ID = 'dplus-subtitle-downloader-menu';
   const PLAYBACK_URL = 'https://disney.playback.edge.bamgrid.com/v7/playback/ctr-regular';
 
@@ -1253,7 +1253,8 @@
     if (!AppState.selectedSeason && AppState.seasonData.seasons.length > 0) {
       AppState.selectedSeason = AppState.seasonData.seasons[0].seasonNumber;
     }
-    debuglog(`Sezon verisi: ${found.seriesTitle || '?'} — ${found.seasons.length} sezon, ${found.seasons.reduce((s, se) => s + se.episodes.length, 0)} bolum`);
+    const totalEps = AppState.seasonData.seasons.reduce((s, se) => s + se.episodes.length, 0);
+    debuglog(`Sezon verisi: ${AppState.seasonData.seriesTitle || '?'} — ${AppState.seasonData.seasons.length} sezon, ${totalEps} bolum`);
     createMenu();
   }
 
