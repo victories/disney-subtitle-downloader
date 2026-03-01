@@ -2,7 +2,7 @@
 // @name        Disney+ Subtitle Downloader
 // @description Disney+ (disneyplus.com) altyazı indirici. Tek bölüm, tüm diller veya tüm sezon ZIP olarak indirilir. VTT→SRT dönüştürme, forced altyazı desteği.
 // @license     MIT
-// @version     3.6.1
+// @version     3.7.0
 // @namespace   victories.disneyplus.subtitle
 // @match       https://www.disneyplus.com/*
 // @grant       none
@@ -1080,7 +1080,9 @@
         if (parsed) eps.push(parsed);
       }
       if (eps.length > 0) {
-        seasons.push({ seasonNumber: seasonNum, seasonId: s.seasonId || '', hasMore: !!s.hasMore, episodes: eps });
+        const sId = s.seasonId || s.id || s.contentId || s.encodedId || '';
+        const more = s.hasMore ?? (s.pagination?.hasMore) ?? (s.meta?.hits > episodeList.length) ?? false;
+        seasons.push({ seasonNumber: seasonNum, seasonId: sId, hasMore: !!more, episodes: eps });
       }
     }
     return seasons.length > 0 ? { seriesTitle, seriesId: '', seasons } : null;
@@ -1098,7 +1100,9 @@
         const parsed = parseEpisodeObject(ep, seasonNum);
         if (parsed) eps.push(parsed);
       }
-      seasons.push({ seasonNumber: seasonNum, seasonId: s.seasonId || '', hasMore: !!s.hasMore, episodes: eps });
+      const sId = s.seasonId || s.id || s.contentId || s.encodedId || '';
+      const more = s.hasMore ?? (s.pagination?.hasMore) ?? (s.meta?.hits > episodeList.length) ?? false;
+      seasons.push({ seasonNumber: seasonNum, seasonId: sId, hasMore: !!more, episodes: eps });
     }
     return seasons.length > 0 ? { seriesTitle, seriesId, seasons } : null;
   }
@@ -1155,7 +1159,9 @@
           if (parsed) eps.push(parsed);
         }
         if (eps.length > 0) {
-          return { seriesTitle: '', seriesId: '', seasons: [{ seasonNumber: seasonNum, episodes: eps }] };
+          const sId = seasonObj.seasonId || seasonObj.id || seasonObj.contentId || '';
+          const more = seasonObj.hasMore ?? seasonObj.pagination?.hasMore ?? false;
+          return { seriesTitle: '', seriesId: '', seasons: [{ seasonNumber: seasonNum, seasonId: sId, hasMore: !!more, episodes: eps }] };
         }
       }
     }
@@ -1204,17 +1210,43 @@
   function processSeasonData(apiResponse) {
     const found = findEpisodeData(apiResponse);
     if (!found || !found.seasons || found.seasons.length === 0) return;
-    if (AppState.seasonData && AppState.seasonData.seasons.length > found.seasons.length) return;
 
-    AppState.seasonData = {
-      seriesTitle: found.seriesTitle || '',
-      seriesId: found.seriesId || '',
-      seasons: found.seasons,
-      capturedAt: Date.now(),
-    };
+    // If we already have season data, try merging instead of replacing
+    if (AppState.seasonData && AppState.seasonData.seasons.length > 0) {
+      if (found.seasons.length >= AppState.seasonData.seasons.length) {
+        // New data has same or more seasons — replace
+        AppState.seasonData = {
+          seriesTitle: found.seriesTitle || AppState.seasonData.seriesTitle || '',
+          seriesId: found.seriesId || AppState.seasonData.seriesId || '',
+          seasons: found.seasons,
+          capturedAt: Date.now(),
+        };
+      } else {
+        // New data has fewer seasons — merge episodes into existing
+        for (const newSeason of found.seasons) {
+          const existing = AppState.seasonData.seasons.find(s => s.seasonNumber === newSeason.seasonNumber);
+          if (existing && newSeason.episodes.length > existing.episodes.length) {
+            existing.episodes = newSeason.episodes;
+            existing.hasMore = newSeason.hasMore;
+            if (newSeason.seasonId) existing.seasonId = newSeason.seasonId;
+          } else if (!existing) {
+            AppState.seasonData.seasons.push(newSeason);
+            AppState.seasonData.seasons.sort((a, b) => a.seasonNumber - b.seasonNumber);
+          }
+        }
+        AppState.seasonData.capturedAt = Date.now();
+      }
+    } else {
+      AppState.seasonData = {
+        seriesTitle: found.seriesTitle || '',
+        seriesId: found.seriesId || '',
+        seasons: found.seasons,
+        capturedAt: Date.now(),
+      };
+    }
 
-    if (!AppState.selectedSeason && found.seasons.length > 0) {
-      AppState.selectedSeason = found.seasons[0].seasonNumber;
+    if (!AppState.selectedSeason && AppState.seasonData.seasons.length > 0) {
+      AppState.selectedSeason = AppState.seasonData.seasons[0].seasonNumber;
     }
     debuglog(`Sezon verisi: ${found.seriesTitle || '?'} — ${found.seasons.length} sezon, ${found.seasons.reduce((s, se) => s + se.episodes.length, 0)} bolum`);
     createMenu();
@@ -1593,22 +1625,38 @@
     let season = AppState.seasonData.seasons.find(s => s.seasonNumber === seasonNumber);
     if (!season || season.episodes.length === 0) return;
 
-    // Fetch remaining episodes if hasMore
-    if ((season.episodes.length === 0 || season.hasMore) && season.seasonId) {
+    // Fetch ALL episodes for this season (Disney+ paginates at ~15 per page)
+    if (season.seasonId) {
       try {
-        const moreUrl = `https://disney.api.edge.bamgrid.com/explore/v1.14/season/${season.seasonId}`;
-        const moreResp = await fetchWithTimeout(moreUrl, {
-          headers: { 'Authorization': AppState.authToken },
-        });
-        if (moreResp.ok) {
-          const moreData = await moreResp.json();
-          const parsed = findEpisodeData(moreData);
-          if (parsed?.seasons?.[0]?.episodes?.length > season.episodes.length) {
-            season.episodes = parsed.seasons[0].episodes;
-            season.hasMore = false;
-          }
+        let allEps = [];
+        let page = 1;
+        const pageSize = 30;
+        let keepGoing = true;
+        debuglog(`Sezon ${seasonNumber}: Tum bolumleri cekiliyor (seasonId: ${season.seasonId})...`);
+
+        while (keepGoing && page <= 10) { // safety: max 10 pages = 300 episodes
+          const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?pageSize=${pageSize}&page=${page}`;
+          const pageResp = await fetchWithTimeout(pageUrl, {
+            headers: { 'Authorization': AppState.authToken },
+          });
+          if (!pageResp.ok) break;
+          const pageData = await pageResp.json();
+          const parsed = findEpisodeData(pageData);
+          const pageEps = parsed?.seasons?.[0]?.episodes || [];
+          if (pageEps.length === 0) break;
+          allEps.push(...pageEps);
+          keepGoing = parsed?.seasons?.[0]?.hasMore || pageEps.length >= pageSize;
+          page++;
         }
-      } catch {}
+
+        if (allEps.length > season.episodes.length) {
+          debuglog(`Sezon ${seasonNumber}: ${season.episodes.length} -> ${allEps.length} bolum yuklendi`);
+          season.episodes = allEps;
+          season.hasMore = false;
+        }
+      } catch (e) {
+        debuglog(`Sezon fetch hatasi: ${e.message}`);
+      }
     }
 
     const fmt = format || AppState.format || 'srt';
