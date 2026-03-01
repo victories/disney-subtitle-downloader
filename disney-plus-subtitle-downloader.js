@@ -1963,7 +1963,7 @@
   function getCSS() {
     return `
     #${MENU_ID} {
-      position: fixed; top: 10px; right: 10px; z-index: 999999999;
+      position: fixed; top: 50px; right: 10px; z-index: 999999999;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
       font-size: 13px;
     }
