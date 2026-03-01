@@ -1207,35 +1207,40 @@
     return null;
   }
 
+  function mergeEpisodes(existing, incoming) {
+    const idSet = new Set(existing.map(e => e.contentId));
+    for (const ep of incoming) {
+      if (ep.contentId && !idSet.has(ep.contentId)) {
+        existing.push(ep);
+        idSet.add(ep.contentId);
+      }
+    }
+    existing.sort((a, b) => a.episodeNumber - b.episodeNumber);
+    return existing;
+  }
+
   function processSeasonData(apiResponse) {
     const found = findEpisodeData(apiResponse);
     if (!found || !found.seasons || found.seasons.length === 0) return;
 
-    // If we already have season data, try merging instead of replacing
     if (AppState.seasonData && AppState.seasonData.seasons.length > 0) {
-      if (found.seasons.length >= AppState.seasonData.seasons.length) {
-        // New data has same or more seasons — replace
-        AppState.seasonData = {
-          seriesTitle: found.seriesTitle || AppState.seasonData.seriesTitle || '',
-          seriesId: found.seriesId || AppState.seasonData.seriesId || '',
-          seasons: found.seasons,
-          capturedAt: Date.now(),
-        };
-      } else {
-        // New data has fewer seasons — merge episodes into existing
-        for (const newSeason of found.seasons) {
-          const existing = AppState.seasonData.seasons.find(s => s.seasonNumber === newSeason.seasonNumber);
-          if (existing && newSeason.episodes.length > existing.episodes.length) {
-            existing.episodes = newSeason.episodes;
-            existing.hasMore = newSeason.hasMore;
-            if (newSeason.seasonId) existing.seasonId = newSeason.seasonId;
-          } else if (!existing) {
-            AppState.seasonData.seasons.push(newSeason);
-            AppState.seasonData.seasons.sort((a, b) => a.seasonNumber - b.seasonNumber);
-          }
+      // Merge into existing season data
+      AppState.seasonData.seriesTitle = found.seriesTitle || AppState.seasonData.seriesTitle || '';
+      AppState.seasonData.seriesId = found.seriesId || AppState.seasonData.seriesId || '';
+      AppState.seasonData.capturedAt = Date.now();
+
+      for (const newSeason of found.seasons) {
+        const existing = AppState.seasonData.seasons.find(s => s.seasonNumber === newSeason.seasonNumber);
+        if (existing) {
+          // Merge episodes by contentId (append new, keep existing)
+          mergeEpisodes(existing.episodes, newSeason.episodes);
+          if (newSeason.seasonId) existing.seasonId = newSeason.seasonId;
+          existing.hasMore = newSeason.hasMore;
+        } else {
+          AppState.seasonData.seasons.push(newSeason);
         }
-        AppState.seasonData.capturedAt = Date.now();
       }
+      AppState.seasonData.seasons.sort((a, b) => a.seasonNumber - b.seasonNumber);
     } else {
       AppState.seasonData = {
         seriesTitle: found.seriesTitle || '',
