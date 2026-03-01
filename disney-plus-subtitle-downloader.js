@@ -1269,27 +1269,75 @@
   function autoScrollForMoreEpisodes() {
     if (AppState._autoScrolling) return;
     AppState._autoScrolling = true;
-    const originalY = window.scrollY;
     debuglog('Auto-scroll: kalan bolumler icin asagi kaydiriliyor...');
 
-    // Scroll to bottom in steps to trigger lazy loading
+    // Disney+ uses a custom scrollable container, not window scroll
+    // Find the main scrollable wrapper
+    function findScrollContainer() {
+      // Try common Disney+ scroll containers
+      const candidates = document.querySelectorAll('[data-testid="content-body"], [class*="page-container"], [class*="content-area"], [class*="scroll"]');
+      for (const el of candidates) {
+        if (el.scrollHeight > el.clientHeight) return el;
+      }
+      // Fallback: find any scrollable ancestor of episode cards
+      const episodeCard = document.querySelector('[data-testid*="card"], [class*="episode"], [class*="set-item"]');
+      if (episodeCard) {
+        let parent = episodeCard.parentElement;
+        while (parent && parent !== document.body) {
+          const style = window.getComputedStyle(parent);
+          const overflow = style.overflowY;
+          if ((overflow === 'auto' || overflow === 'scroll') && parent.scrollHeight > parent.clientHeight + 50) {
+            return parent;
+          }
+          parent = parent.parentElement;
+        }
+      }
+      // Last fallback: document scrolling element
+      return document.scrollingElement || document.documentElement;
+    }
+
+    const container = findScrollContainer();
+    const originalScrollTop = container.scrollTop;
+    const originalWindowY = window.scrollY;
+    debuglog(`Auto-scroll: container bulundu — ${container.tagName}.${container.className?.split(' ')[0] || ''}, scrollHeight=${container.scrollHeight}`);
+
     let step = 0;
-    const maxSteps = 3;
+    const maxSteps = 4;
     const scrollStep = () => {
       step++;
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      debuglog(`Auto-scroll: adim ${step}/${maxSteps}`);
+
+      // Strategy 1: Scroll the found container
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      container.scrollTop = maxScroll;
+
+      // Strategy 2: Also try window scroll
+      window.scrollTo(0, document.documentElement.scrollHeight);
+
+      // Strategy 3: Find last episode card and scrollIntoView
+      const cards = document.querySelectorAll('[data-testid*="card"], [class*="set-item"], [class*="episode-card"]');
+      if (cards.length > 0) {
+        cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+        debuglog(`Auto-scroll: son kart scrollIntoView yapildi (${cards.length} kart)`);
+      }
+
+      // Dispatch scroll events to trigger IntersectionObserver / scroll listeners
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      window.dispatchEvent(new Event('scroll', { bubbles: true }));
+
       if (step < maxSteps) {
-        setTimeout(scrollStep, 1200);
+        setTimeout(scrollStep, 1500);
       } else {
         // Wait for API response, then scroll back
         setTimeout(() => {
-          window.scrollTo({ top: originalY, behavior: 'smooth' });
+          container.scrollTop = originalScrollTop;
+          window.scrollTo(0, originalWindowY);
           AppState._autoScrolling = false;
           debuglog('Auto-scroll: tamamlandi, basa donuldu');
-        }, 1500);
+        }, 2000);
       }
     };
-    setTimeout(scrollStep, 500);
+    setTimeout(scrollStep, 800);
   }
 
   // ============================================================

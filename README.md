@@ -20,6 +20,8 @@ Disney+ platformundan altyazı indirmek için geliştirilmiş Tampermonkey users
 - **Backoff mekanizması** — 429 (rate limit) hatalarında otomatik bekleme ve yeniden deneme
 - **Token yönetimi** — Auth token süresi dolduğunda uyarı verir
 - **Service Worker header çıkarımı** — Disney+ Service Worker'dan gerekli API header'larını otomatik alır
+- **Otomatik bölüm keşfi** — Disney+ sayfaları bölümleri 15'erli gruplar halinde lazy-load eder. Script, tüm bölümlerin yüklenmesi için sayfayı otomatik kaydırır ve geri döner
+- **Sayfalama (pagination)** — Sezon indirirken API üzerinden tüm bölümler otomatik çekilir (sayfa başına 30, max 10 sayfa)
 
 ### 🖥️ Kullanıcı Arayüzü
 - **Dark tema** — Disney+ arayüzüne uyumlu koyu tema
@@ -78,10 +80,11 @@ ZIP dosyaları düz yapıdadır (klasör içermez).
 
 ### Nasıl Çalışır
 1. **Intercept** — Disney+'ın playback API isteklerini yakalar (XHR/Fetch)
-2. **M3U8 Parse** — HLS manifest'inden altyazı track'lerini çıkarır
-3. **VTT Segmentleri** — Parçalı altyazı dosyalarını indirir ve birleştirir
-4. **Dönüştürme** — VTT formatını SRT'ye dönüştürür (zaman damgaları, etiketler)
-5. **Paketleme** — JSZip ile ZIP dosyası oluşturur, FileSaver ile indirir
+2. **Bölüm Keşfi** — Sayfa açılınca bölüm listesi yakalanır. 15+ bölümlü dizilerde sayfa otomatik kaydırılarak kalan bölümler de yüklenir
+3. **M3U8 Parse** — HLS manifest'inden altyazı track'lerini çıkarır
+4. **VTT Segmentleri** — Parçalı altyazı dosyalarını indirir ve birleştirir
+5. **Dönüştürme** — VTT formatını SRT'ye dönüştürür (zaman damgaları, etiketler)
+6. **Paketleme** — JSZip ile ZIP dosyası oluşturur, FileSaver ile indirir
 
 ### Teknoloji
 - Vanilla JavaScript (framework yok)
@@ -109,6 +112,7 @@ Veriler content-scoped localStorage'da tutulur. Her dizi/film kendi scope'unda s
 | Sezon indirme çalışmıyor | Önce bir bölümü oynatarak token alın |
 | Token süresi doldu uyarısı | Herhangi bir bölümü birkaç saniye oynatın |
 | 429 hatası (rate limit) | Script otomatik bekler, müdahale etmeyin |
+| 15+ bölümlü dizide tüm bölümler görünmüyor | Sayfa açıldığında script otomatik kaydırma yapar. Birkaç saniye bekleyin |
 
 ## 📄 Lisans
 
