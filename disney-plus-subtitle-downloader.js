@@ -89,7 +89,7 @@
     progressText: '',
     progressPct: 0,
     // Auto-scroll
-    _autoScrolling: false,
+    _fetchingMore: false,
   };
 
   // ============================================================
@@ -1036,9 +1036,13 @@
                   ep.text?.title?.full?.episode?.default?.content ||
                   ep.title || ep.name || '';
     const episodeNumber = ep.episodeSequenceNumber || ep.episodeNumber ||
-                          parseInt(ep.visuals?.episodeNumber) || ep.number || 0;
+                          parseInt(ep.visuals?.episodeNumber) ||
+                          ep.meta?.episodeSequenceNumber || ep.meta?.episodeNumber ||
+                          ep.number || ep.sequence || 0;
     const seasonNumber = ep.seasonSequenceNumber || ep.seasonNumber ||
-                         parseInt(ep.visuals?.seasonNumber) || defaultSeason || 1;
+                         parseInt(ep.visuals?.seasonNumber) ||
+                         ep.meta?.seasonSequenceNumber || ep.meta?.seasonNumber ||
+                         defaultSeason || 1;
 
     if (!contentId) return null;
     return { contentId, resourceId, title, episodeNumber, seasonNumber };
@@ -1259,85 +1263,74 @@
     debuglog(`Sezon verisi: ${AppState.seasonData.seriesTitle || '?'} — ${AppState.seasonData.seasons.length} sezon, ${totalEps} bolum`);
     createMenu();
 
-    // Auto-scroll to load remaining episodes if any season has exactly 15 (Disney+ page size)
+    // If any season has episodes divisible by 15 (Disney+ page size), fetch remaining via API
     const needsMore = AppState.seasonData.seasons.some(s => s.episodes.length % 15 === 0 && s.episodes.length > 0);
-    if (needsMore && !AppState._autoScrolling) {
-      autoScrollForMoreEpisodes();
+    if (needsMore && !AppState._fetchingMore) {
+      fetchRemainingEpisodesViaApi();
     }
   }
 
-  function autoScrollForMoreEpisodes() {
-    if (AppState._autoScrolling) return;
-    AppState._autoScrolling = true;
-    debuglog('Auto-scroll: kalan bolumler icin asagi kaydiriliyor...');
+  async function fetchRemainingEpisodesViaApi() {
+    if (AppState._fetchingMore || !AppState.authToken) return;
+    AppState._fetchingMore = true;
 
-    // Disney+ uses a custom scrollable container, not window scroll
-    // Find the main scrollable wrapper
-    function findScrollContainer() {
-      // Try common Disney+ scroll containers
-      const candidates = document.querySelectorAll('[data-testid="content-body"], [class*="page-container"], [class*="content-area"], [class*="scroll"]');
-      for (const el of candidates) {
-        if (el.scrollHeight > el.clientHeight) return el;
-      }
-      // Fallback: find any scrollable ancestor of episode cards
-      const episodeCard = document.querySelector('[data-testid*="card"], [class*="episode"], [class*="set-item"]');
-      if (episodeCard) {
-        let parent = episodeCard.parentElement;
-        while (parent && parent !== document.body) {
-          const style = window.getComputedStyle(parent);
-          const overflow = style.overflowY;
-          if ((overflow === 'auto' || overflow === 'scroll') && parent.scrollHeight > parent.clientHeight + 50) {
-            return parent;
+    try {
+      for (const season of AppState.seasonData.seasons) {
+        if (season.episodes.length % 15 !== 0 || season.episodes.length === 0) continue;
+        if (!season.seasonId) {
+          debuglog(`Sezon ${season.seasonNumber}: seasonId yok, API fetch yapilamiyor`);
+          continue;
+        }
+
+        debuglog(`Sezon ${season.seasonNumber}: ${season.episodes.length} bolum var, API'den tumu cekiliyor (seasonId: ${season.seasonId})...`);
+
+        try {
+          let allEps = [];
+          let page = 1;
+          const pageSize = 50;
+          let keepGoing = true;
+
+          while (keepGoing && page <= 10) {
+            const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?pageSize=${pageSize}&page=${page}`;
+            const resp = await fetchWithTimeout(pageUrl, {
+              headers: { 'Authorization': AppState.authToken },
+            });
+
+            if (!resp.ok) {
+              debuglog(`Sezon API hatasi: ${resp.status}`);
+              break;
+            }
+
+            const data = await resp.json();
+            const parsed = findEpisodeData(data);
+            const pageEps = parsed?.seasons?.[0]?.episodes || [];
+            debuglog(`Sezon ${season.seasonNumber} sayfa ${page}: ${pageEps.length} bolum bulundu`);
+
+            if (pageEps.length === 0) break;
+            allEps.push(...pageEps);
+            keepGoing = parsed?.seasons?.[0]?.hasMore || pageEps.length >= pageSize;
+            page++;
           }
-          parent = parent.parentElement;
+
+          if (allEps.length > 0) {
+            const before = season.episodes.length;
+            mergeEpisodes(season.episodes, allEps);
+            season.hasMore = false;
+            debuglog(`Sezon ${season.seasonNumber}: ${before} -> ${season.episodes.length} bolum (API fetch)`);
+          }
+        } catch (e) {
+          debuglog(`Sezon ${season.seasonNumber} API fetch hatasi: ${e.message}`);
         }
       }
-      // Last fallback: document scrolling element
-      return document.scrollingElement || document.documentElement;
+
+      // Update UI with new episode counts
+      const totalEps = AppState.seasonData.seasons.reduce((s, se) => s + se.episodes.length, 0);
+      debuglog(`API fetch tamamlandi: toplam ${totalEps} bolum`);
+      createMenu();
+
+    } finally {
+      AppState._fetchingMore = false;
     }
-
-    const container = findScrollContainer();
-    const originalScrollTop = container.scrollTop;
-    const originalWindowY = window.scrollY;
-    debuglog(`Auto-scroll: container bulundu — ${container.tagName}.${container.className?.split(' ')[0] || ''}, scrollHeight=${container.scrollHeight}`);
-
-    let step = 0;
-    const maxSteps = 4;
-    const scrollStep = () => {
-      step++;
-      debuglog(`Auto-scroll: adim ${step}/${maxSteps}`);
-
-      // Strategy 1: Scroll the found container
-      const maxScroll = container.scrollHeight - container.clientHeight;
-      container.scrollTop = maxScroll;
-
-      // Strategy 2: Also try window scroll
-      window.scrollTo(0, document.documentElement.scrollHeight);
-
-      // Strategy 3: Find last episode card and scrollIntoView
-      const cards = document.querySelectorAll('[data-testid*="card"], [class*="set-item"], [class*="episode-card"]');
-      if (cards.length > 0) {
-        cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
-        debuglog(`Auto-scroll: son kart scrollIntoView yapildi (${cards.length} kart)`);
-      }
-
-      // Dispatch scroll events to trigger IntersectionObserver / scroll listeners
-      container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      window.dispatchEvent(new Event('scroll', { bubbles: true }));
-
-      if (step < maxSteps) {
-        setTimeout(scrollStep, 1500);
-      } else {
-        // Wait for API response, then scroll back
-        setTimeout(() => {
-          container.scrollTop = originalScrollTop;
-          window.scrollTo(0, originalWindowY);
-          AppState._autoScrolling = false;
-          debuglog('Auto-scroll: tamamlandi, basa donuldu');
-        }, 2000);
-      }
-    };
-    setTimeout(scrollStep, 800);
   }
 
   // ============================================================
@@ -1713,37 +1706,45 @@
     let season = AppState.seasonData.seasons.find(s => s.seasonNumber === seasonNumber);
     if (!season || season.episodes.length === 0) return;
 
-    // Fetch ALL episodes for this season (Disney+ paginates at ~15 per page)
-    if (season.seasonId) {
+    // Fetch ALL episodes for this season via API (Disney+ paginates at ~15 per page on browse)
+    if (season.seasonId && season.episodes.length % 15 === 0) {
       try {
         let allEps = [];
         let page = 1;
-        const pageSize = 30;
+        const pageSize = 50;
         let keepGoing = true;
-        debuglog(`Sezon ${seasonNumber}: Tum bolumleri cekiliyor (seasonId: ${season.seasonId})...`);
+        debuglog(`Sezon ${seasonNumber}: API'den tum bolumler cekiliyor (seasonId: ${season.seasonId}, mevcut: ${season.episodes.length})...`);
 
-        while (keepGoing && page <= 10) { // safety: max 10 pages = 300 episodes
+        while (keepGoing && page <= 10) {
           const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?pageSize=${pageSize}&page=${page}`;
           const pageResp = await fetchWithTimeout(pageUrl, {
             headers: { 'Authorization': AppState.authToken },
           });
-          if (!pageResp.ok) break;
+
+          if (!pageResp.ok) {
+            debuglog(`Sezon API sayfa ${page}: HTTP ${pageResp.status}`);
+            break;
+          }
+
           const pageData = await pageResp.json();
           const parsed = findEpisodeData(pageData);
           const pageEps = parsed?.seasons?.[0]?.episodes || [];
+          debuglog(`Sezon ${seasonNumber} sayfa ${page}: ${pageEps.length} bolum`);
+
           if (pageEps.length === 0) break;
           allEps.push(...pageEps);
           keepGoing = parsed?.seasons?.[0]?.hasMore || pageEps.length >= pageSize;
           page++;
         }
 
-        if (allEps.length > season.episodes.length) {
-          debuglog(`Sezon ${seasonNumber}: ${season.episodes.length} -> ${allEps.length} bolum yuklendi`);
-          season.episodes = allEps;
+        if (allEps.length > 0) {
+          const before = season.episodes.length;
+          mergeEpisodes(season.episodes, allEps);
           season.hasMore = false;
+          debuglog(`Sezon ${seasonNumber}: ${before} -> ${season.episodes.length} bolum (indirme oncesi API fetch)`);
         }
       } catch (e) {
-        debuglog(`Sezon fetch hatasi: ${e.message}`);
+        debuglog(`Sezon API fetch hatasi: ${e.message}`);
       }
     }
 
@@ -1759,6 +1760,12 @@
     let backoffDelay = TIMING.SEASON_RATE_LIMIT;
 
     updateProgress(0, `0/${episodes.length}`);
+
+    debuglog(`Sezon indirme basliyor: ${episodes.length} bolum, dil: ${langCode}`);
+    for (let i = 0; i < 3 && i < episodes.length; i++) {
+      const ep = episodes[i];
+      debuglog(`  Episode[${i}]: contentId=${ep.contentId?.substring(0, 16)}, ep=${ep.episodeNumber}, s=${ep.seasonNumber}, title="${ep.title}", resourceId=${ep.resourceId ? 'var' : 'yok'}`);
+    }
 
     for (let i = 0; i < episodes.length; i++) {
       if (AppState.seasonAbort?.signal?.aborted) break;
