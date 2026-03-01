@@ -1241,7 +1241,10 @@
           // Merge episodes by contentId (append new, keep existing)
           mergeEpisodes(existing.episodes, newSeason.episodes);
           if (newSeason.seasonId) existing.seasonId = newSeason.seasonId;
-          existing.hasMore = newSeason.hasMore;
+          // Don't override hasMore/fetchCompleted if already fetched
+          if (!existing._fetchCompleted) {
+            existing.hasMore = newSeason.hasMore;
+          }
         } else {
           AppState.seasonData.seasons.push(newSeason);
         }
@@ -1263,8 +1266,8 @@
     debuglog(`Sezon verisi: ${AppState.seasonData.seriesTitle || '?'} — ${AppState.seasonData.seasons.length} sezon, ${totalEps} bolum`);
     createMenu();
 
-    // If any season has episodes divisible by 15 (Disney+ page size), fetch remaining via API
-    const needsMore = AppState.seasonData.seasons.some(s => s.episodes.length % 15 === 0 && s.episodes.length > 0);
+    // If any season has hasMore flag or pagination indicates more, fetch remaining via API
+    const needsMore = AppState.seasonData.seasons.some(s => s.hasMore && !s._fetchCompleted);
     if (needsMore && !AppState._fetchingMore) {
       fetchRemainingEpisodesViaApi();
     }
@@ -1276,22 +1279,24 @@
 
     try {
       for (const season of AppState.seasonData.seasons) {
-        if (season.episodes.length % 15 !== 0 || season.episodes.length === 0) continue;
+        // Skip if already fetched or no more episodes
+        if (season._fetchCompleted || !season.hasMore) continue;
         if (!season.seasonId) {
           debuglog(`Sezon ${season.seasonNumber}: seasonId yok, API fetch yapilamiyor`);
+          season._fetchCompleted = true;
           continue;
         }
 
-        debuglog(`Sezon ${season.seasonNumber}: ${season.episodes.length} bolum var, API'den tumu cekiliyor (seasonId: ${season.seasonId})...`);
+        debuglog(`Sezon ${season.seasonNumber}: ${season.episodes.length} bolum var, API'den geri kalan cekiliyor (seasonId: ${season.seasonId})...`);
 
         try {
-          let allEps = [];
-          let page = 1;
-          const pageSize = 50;
-          let keepGoing = true;
+          // Use offset-based pagination (Disney+ explore API uses offset, not page)
+          let offset = season.episodes.length; // Start from where we left off
+          let hasMore = true;
+          let fetchCount = 0;
 
-          while (keepGoing && page <= 10) {
-            const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?pageSize=${pageSize}&page=${page}`;
+          while (hasMore && fetchCount < 20) {
+            const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?offset=${offset}`;
             const resp = await fetchWithTimeout(pageUrl, {
               headers: { 'Authorization': AppState.authToken },
             });
@@ -1302,24 +1307,38 @@
             }
 
             const data = await resp.json();
-            const parsed = findEpisodeData(data);
-            const pageEps = parsed?.seasons?.[0]?.episodes || [];
-            debuglog(`Sezon ${season.seasonNumber} sayfa ${page}: ${pageEps.length} bolum bulundu`);
+            const seasonData = data?.data?.season;
+            if (!seasonData || !seasonData.items || seasonData.items.length === 0) break;
+
+            const pageEps = [];
+            const seasonNum = season.seasonNumber;
+            for (const ep of seasonData.items) {
+              const parsed = parseEpisodeObject(ep, seasonNum);
+              if (parsed) pageEps.push(parsed);
+            }
+
+            debuglog(`Sezon ${season.seasonNumber} offset=${offset}: ${pageEps.length} bolum bulundu`);
 
             if (pageEps.length === 0) break;
-            allEps.push(...pageEps);
-            keepGoing = parsed?.seasons?.[0]?.hasMore || pageEps.length >= pageSize;
-            page++;
+            const before = season.episodes.length;
+            mergeEpisodes(season.episodes, pageEps);
+            const added = season.episodes.length - before;
+
+            // Check pagination
+            hasMore = seasonData.pagination?.hasMore ?? false;
+            offset = (seasonData.pagination?.currentOffset ?? offset) + seasonData.items.length;
+            fetchCount++;
+
+            // Safety: if no new episodes added, stop
+            if (added === 0) break;
           }
 
-          if (allEps.length > 0) {
-            const before = season.episodes.length;
-            mergeEpisodes(season.episodes, allEps);
-            season.hasMore = false;
-            debuglog(`Sezon ${season.seasonNumber}: ${before} -> ${season.episodes.length} bolum (API fetch)`);
-          }
+          season.hasMore = false;
+          season._fetchCompleted = true;
+          debuglog(`Sezon ${season.seasonNumber}: toplam ${season.episodes.length} bolum (API fetch tamamlandi)`);
         } catch (e) {
           debuglog(`Sezon ${season.seasonNumber} API fetch hatasi: ${e.message}`);
+          season._fetchCompleted = true;
         }
       }
 
@@ -1706,43 +1725,50 @@
     let season = AppState.seasonData.seasons.find(s => s.seasonNumber === seasonNumber);
     if (!season || season.episodes.length === 0) return;
 
-    // Fetch ALL episodes for this season via API (Disney+ paginates at ~15 per page on browse)
-    if (season.seasonId && season.episodes.length % 15 === 0) {
+    // Fetch ALL episodes for this season via API if not already done (Disney+ paginates browse pages)
+    if (season.seasonId && season.hasMore && !season._fetchCompleted) {
       try {
-        let allEps = [];
-        let page = 1;
-        const pageSize = 50;
-        let keepGoing = true;
-        debuglog(`Sezon ${seasonNumber}: API'den tum bolumler cekiliyor (seasonId: ${season.seasonId}, mevcut: ${season.episodes.length})...`);
+        let offset = season.episodes.length;
+        let hasMorePages = true;
+        let fetchCount = 0;
+        debuglog(`Sezon ${seasonNumber}: API'den geri kalan bolumler cekiliyor (seasonId: ${season.seasonId}, mevcut: ${season.episodes.length})...`);
 
-        while (keepGoing && page <= 10) {
-          const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?pageSize=${pageSize}&page=${page}`;
+        while (hasMorePages && fetchCount < 20) {
+          const pageUrl = `https://disney.api.edge.bamgrid.com/explore/v1.15/season/${season.seasonId}?offset=${offset}`;
           const pageResp = await fetchWithTimeout(pageUrl, {
             headers: { 'Authorization': AppState.authToken },
           });
 
           if (!pageResp.ok) {
-            debuglog(`Sezon API sayfa ${page}: HTTP ${pageResp.status}`);
+            debuglog(`Sezon API offset=${offset}: HTTP ${pageResp.status}`);
             break;
           }
 
           const pageData = await pageResp.json();
-          const parsed = findEpisodeData(pageData);
-          const pageEps = parsed?.seasons?.[0]?.episodes || [];
-          debuglog(`Sezon ${seasonNumber} sayfa ${page}: ${pageEps.length} bolum`);
+          const seasonData = pageData?.data?.season;
+          if (!seasonData || !seasonData.items || seasonData.items.length === 0) break;
+
+          const pageEps = [];
+          for (const ep of seasonData.items) {
+            const parsed = parseEpisodeObject(ep, seasonNumber);
+            if (parsed) pageEps.push(parsed);
+          }
+          debuglog(`Sezon ${seasonNumber} offset=${offset}: ${pageEps.length} bolum`);
 
           if (pageEps.length === 0) break;
-          allEps.push(...pageEps);
-          keepGoing = parsed?.seasons?.[0]?.hasMore || pageEps.length >= pageSize;
-          page++;
+          const before = season.episodes.length;
+          mergeEpisodes(season.episodes, pageEps);
+          const added = season.episodes.length - before;
+
+          hasMorePages = seasonData.pagination?.hasMore ?? false;
+          offset = (seasonData.pagination?.currentOffset ?? offset) + seasonData.items.length;
+          fetchCount++;
+          if (added === 0) break;
         }
 
-        if (allEps.length > 0) {
-          const before = season.episodes.length;
-          mergeEpisodes(season.episodes, allEps);
-          season.hasMore = false;
-          debuglog(`Sezon ${seasonNumber}: ${before} -> ${season.episodes.length} bolum (indirme oncesi API fetch)`);
-        }
+        season.hasMore = false;
+        season._fetchCompleted = true;
+        debuglog(`Sezon ${seasonNumber}: toplam ${season.episodes.length} bolum (indirme oncesi fetch tamamlandi)`);
       } catch (e) {
         debuglog(`Sezon API fetch hatasi: ${e.message}`);
       }
@@ -1813,7 +1839,8 @@
         if (!content || content.trim().length < 10) continue;
 
         const epTitle = ep.title ? `.${sanitize(ep.title)}` : '';
-        const epFilename = `${epLabel}${epTitle}.${getLangSafe(langCode)}.${fmt}`;
+        const titlePrefix = seriesTitle ? `${seriesTitle}.` : '';
+        const epFilename = `${titlePrefix}${epLabel}${epTitle}.${getLangSafe(langCode)}.${fmt}`;
         zip.file(epFilename, '\ufeff' + content);
         successCount++;
         debuglog(`[${epLabel}] OK`);
