@@ -88,6 +88,8 @@
     // Progress
     progressText: '',
     progressPct: 0,
+    // Auto-scroll
+    _autoScrolling: false,
   };
 
   // ============================================================
@@ -1256,6 +1258,38 @@
     const totalEps = AppState.seasonData.seasons.reduce((s, se) => s + se.episodes.length, 0);
     debuglog(`Sezon verisi: ${AppState.seasonData.seriesTitle || '?'} — ${AppState.seasonData.seasons.length} sezon, ${totalEps} bolum`);
     createMenu();
+
+    // Auto-scroll to load remaining episodes if any season has exactly 15 (Disney+ page size)
+    const needsMore = AppState.seasonData.seasons.some(s => s.episodes.length % 15 === 0 && s.episodes.length > 0);
+    if (needsMore && !AppState._autoScrolling) {
+      autoScrollForMoreEpisodes();
+    }
+  }
+
+  function autoScrollForMoreEpisodes() {
+    if (AppState._autoScrolling) return;
+    AppState._autoScrolling = true;
+    const originalY = window.scrollY;
+    debuglog('Auto-scroll: kalan bolumler icin asagi kaydiriliyor...');
+
+    // Scroll to bottom in steps to trigger lazy loading
+    let step = 0;
+    const maxSteps = 3;
+    const scrollStep = () => {
+      step++;
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      if (step < maxSteps) {
+        setTimeout(scrollStep, 1200);
+      } else {
+        // Wait for API response, then scroll back
+        setTimeout(() => {
+          window.scrollTo({ top: originalY, behavior: 'smooth' });
+          AppState._autoScrolling = false;
+          debuglog('Auto-scroll: tamamlandi, basa donuldu');
+        }, 1500);
+      }
+    };
+    setTimeout(scrollStep, 500);
   }
 
   // ============================================================
