@@ -2,9 +2,11 @@
 // @name        Disney+ Subtitle Downloader
 // @description Disney+ (disneyplus.com) altyazı indirici. Tek bölüm, tüm diller veya tüm sezon ZIP olarak indirilir. VTT→SRT dönüştürme, forced altyazı desteği.
 // @license     MIT
-// @version     3.7.0
+// @version     3.8.0
 // @namespace   victories.disneyplus.subtitle
 // @match       https://www.disneyplus.com/*
+// @updateURL   https://raw.githubusercontent.com/victories/disney-subtitle-downloader/main/disney-plus-subtitle-downloader.user.js
+// @downloadURL https://raw.githubusercontent.com/victories/disney-subtitle-downloader/main/disney-plus-subtitle-downloader.user.js
 // @grant       none
 // @require     https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
 // @require     https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js
@@ -18,7 +20,7 @@
   // SECTION 1: CONSTANTS & STATE
   // ============================================================
 
-  const VERSION = '3.7.0';
+  const VERSION = '3.8.0';
   const MENU_ID = 'dplus-subtitle-downloader-menu';
   const PLAYBACK_URL = 'https://disney.playback.edge.bamgrid.com/v7/playback/ctr-regular';
 
@@ -1078,16 +1080,24 @@
     for (const s of episodeContainer.seasons) {
       seasonIndex++;
       const episodeList = s.items || s.episodes || [];
-      if (episodeList.length === 0) continue; // Skip empty seasons
-      const seasonNum = s.seasonSequenceNumber || s.seasonNumber || seasonIndex;
+      // Extract season number: try direct fields, then parse from visuals.name ("1. Sezon" → 1)
+      let seasonNum = s.seasonSequenceNumber || s.seasonNumber || 0;
+      if (!seasonNum && s.visuals?.name) {
+        const nameMatch = s.visuals.name.match(/(\d+)/);
+        if (nameMatch) seasonNum = parseInt(nameMatch[1]);
+      }
+      if (!seasonNum) seasonNum = seasonIndex;
+
       const eps = [];
       for (const ep of episodeList) {
         const parsed = parseEpisodeObject(ep, seasonNum);
         if (parsed) eps.push(parsed);
       }
-      if (eps.length > 0) {
-        const sId = s.seasonId || s.id || s.contentId || s.encodedId || '';
-        const more = s.hasMore ?? (s.pagination?.hasMore) ?? (s.meta?.hits > episodeList.length) ?? false;
+      const sId = s.seasonId || s.id || s.contentId || s.encodedId || '';
+      const more = s.hasMore ?? (s.pagination?.hasMore) ?? (s.meta?.hits > episodeList.length) ?? false;
+      const totalCount = s.pagination?.totalCount || 0;
+      // Include season if it has episodes OR if API says there are more to fetch
+      if (eps.length > 0 || (!!more && totalCount > 0)) {
         seasons.push({ seasonNumber: seasonNum, seasonId: sId, hasMore: !!more, episodes: eps });
       }
     }
